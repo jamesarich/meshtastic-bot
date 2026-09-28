@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -22,6 +23,15 @@ type MockGitHubClient struct {
 	CompareCommitsFunc func(owner, repo, base, head string) (*gogithub.CommitsComparison, error)
 	CreateIssueFunc    func(owner, repo, title, body string, labels []string) (*internalgithub.IssueResponse, error)
 	GetRepositoryFunc  func(owner, repo string) (*gogithub.Repository, error)
+
+	CompareCommitsPageFunc func(owner, repo, base, head string, perPage, page int) (*gogithub.CommitsComparison, error)
+}
+
+func (m *MockGitHubClient) CompareCommitsPage(owner, repo, base, head string, perPage, page int) (*gogithub.CommitsComparison, error) {
+	if m.CompareCommitsPageFunc != nil {
+		return m.CompareCommitsPageFunc(owner, repo, base, head, perPage, page)
+	}
+	return nil, errors.New("CompareCommitsPage not mocked")
 }
 
 func (m *MockGitHubClient) GetReleases(owner, repo string, limit int) ([]*gogithub.RepositoryRelease, error) {
@@ -285,7 +295,7 @@ func TestFormatChangelogMessage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := formatChangelogMessage(tt.base, tt.head, tt.comparison)
+			got := formatChangelogMessage("meshtastic/web", tt.base, tt.head, tt.comparison)
 
 			for _, w := range tt.want {
 				if !strings.Contains(got, w) {
@@ -1877,5 +1887,89 @@ func TestHandleChangelog_NoOptions(t *testing.T) {
 
 	if capturedResponse.Data.Content != "Please provide both base and head versions." {
 		t.Errorf("Expected validation error message, got: %s", capturedResponse.Data.Content)
+	}
+}
+
+func numberedCommits(from, to int) []*gogithub.RepositoryCommit {
+	var out []*gogithub.RepositoryCommit
+	for n := from; n <= to; n++ {
+		out = append(out, &gogithub.RepositoryCommit{
+			SHA:    gogithub.String(fmt.Sprintf("%07d", n)),
+			Commit: &gogithub.Commit{Message: gogithub.String(fmt.Sprintf("commit %d", n))},
+		})
+	}
+	return out
+}
+
+func TestGetChangelogMessageListsTheNewestPastTheAPICap(t *testing.T) {
+	originalClient, originalOwner, originalRepo := GithubClient, GithubOwner, GithubRepo
+	defer func() { GithubClient, GithubOwner, GithubRepo = originalClient, originalOwner, originalRepo }()
+	GithubOwner, GithubRepo = "meshtastic", "web"
+	comparisonCacheMutex.Lock()
+	comparisonCache = make(map[string]*CachedComparison)
+	comparisonCacheMutex.Unlock()
+
+	total := 537
+	var pages []int
+	GithubClient = &MockGitHubClient{
+		CompareCommitsFunc: func(owner, repo, base, head string) (*gogithub.CommitsComparison, error) {
+			// The unpaged API returns the oldest 250 and the true total.
+			return &gogithub.CommitsComparison{TotalCommits: gogithub.Int(total), Commits: numberedCommits(1, 250)}, nil
+		},
+		CompareCommitsPageFunc: func(owner, repo, base, head string, perPage, page int) (*gogithub.CommitsComparison, error) {
+			pages = append(pages, page)
+			from := (page-1)*perPage + 1
+			to := from + perPage - 1
+			if to > total {
+				to = total
+			}
+			return &gogithub.CommitsComparison{TotalCommits: gogithub.Int(total), Commits: numberedCommits(from, to)}, nil
+		},
+	}
+
+	msg, err := getChangelogMessage("v2.6.4", "v2.7.2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for n := 528; n <= 537; n++ {
+		if !strings.Contains(msg, fmt.Sprintf("commit %d ", n)) {
+			t.Errorf("newest commit %d missing:\n%s", n, msg)
+		}
+	}
+	if strings.Contains(msg, "commit 250 ") || strings.Contains(msg, "commit 527 ") {
+		t.Errorf("older commits listed:\n%s", msg)
+	}
+	if !strings.Contains(msg, "*Showing last 10 of 537 commits*") || !strings.Contains(msg, "in meshtastic/web") {
+		t.Errorf("header does not give the total and repo:\n%s", msg)
+	}
+	if fmt.Sprint(pages) != "[54 53]" {
+		t.Errorf("fetched pages %v, want the last page and the one before it", pages)
+	}
+}
+
+func TestHandleChangelogAutocompleteSkipsDrafts(t *testing.T) {
+	originalClient := GithubClient
+	defer func() { GithubClient = originalClient }()
+	GithubClient = &MockGitHubClient{
+		GetReleasesFunc: func(owner, repo string, limit int) ([]*gogithub.RepositoryRelease, error) {
+			return []*gogithub.RepositoryRelease{
+				{TagName: gogithub.String("v2.8.1.8e6a88d"), Draft: gogithub.Bool(true)},
+				{TagName: gogithub.String("v2.8.0")},
+			}, nil
+		},
+	}
+	releaseCacheMutex.Lock()
+	releaseCache, lastCacheUpdate = nil, time.Time{}
+	releaseCacheMutex.Unlock()
+
+	var resp discordgo.InteractionResponse
+	var edited string
+	s := recordingSession(t, &resp, &edited)
+	handleChangelogAutocomplete(s, &discordgo.InteractionCreate{Interaction: &discordgo.Interaction{
+		Type: discordgo.InteractionApplicationCommandAutocomplete,
+		Data: discordgo.ApplicationCommandInteractionData{Name: "changelog"},
+	}})
+	if resp.Data == nil || len(resp.Data.Choices) != 1 || resp.Data.Choices[0].Name != "v2.8.0" {
+		t.Errorf("want only the published release, got %+v", resp.Data)
 	}
 }

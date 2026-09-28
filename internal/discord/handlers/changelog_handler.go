@@ -114,8 +114,15 @@ func getChangelogMessage(base, head string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if total := comparison.GetTotalCommits(); total > len(comparison.Commits) {
+		recent, err := newestCommits(base, head, total)
+		if err != nil {
+			return "", err
+		}
+		comparison.Commits = recent
+	}
 
-	message := formatChangelogMessage(base, head, comparison)
+	message := formatChangelogMessage(GithubOwner+"/"+GithubRepo, base, head, comparison)
 
 	// Store in cache
 	comparisonCache[cacheKey] = &CachedComparison{
@@ -126,16 +133,45 @@ func getChangelogMessage(base, head string) (string, error) {
 	return message, nil
 }
 
-func formatChangelogMessage(base, head string, comparison *gogithub.CommitsComparison) string {
+// changelogShown is how many of the newest commits a reply lists.
+const changelogShown = 10
+
+// newestCommits fetches the last changelogShown commits of a comparison longer
+// than the 250 the unpaged API returns. Pages run oldest first, so the newest
+// sit on the last page, and a short last page is topped up from the one before.
+func newestCommits(base, head string, total int) ([]*gogithub.RepositoryCommit, error) {
+	last := (total + changelogShown - 1) / changelogShown
+	page, err := GithubClient.CompareCommitsPage(GithubOwner, GithubRepo, base, head, changelogShown, last)
+	if err != nil {
+		return nil, err
+	}
+	commits := page.Commits
+	if len(commits) < changelogShown && last > 1 {
+		prev, err := GithubClient.CompareCommitsPage(GithubOwner, GithubRepo, base, head, changelogShown, last-1)
+		if err != nil {
+			return nil, err
+		}
+		commits = append(append([]*gogithub.RepositoryCommit{}, prev.Commits...), commits...)
+	}
+	return commits, nil
+}
+
+func formatChangelogMessage(repoName, base, head string, comparison *gogithub.CommitsComparison) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("## Changes from %s to %s\n", base, head))
+	sb.WriteString(fmt.Sprintf("## Changes from %s to %s in %s\n", base, head, repoName))
 	sb.WriteString(fmt.Sprintf("Total commits: %d\n\n", comparison.GetTotalCommits()))
 
 	// List commits (limit to last 10 to avoid hitting message length limits)
 	commits := comparison.Commits
-	if len(commits) > 10 {
-		sb.WriteString(fmt.Sprintf("*Showing last 10 of %d commits*\n\n", len(commits)))
-		commits = commits[len(commits)-10:]
+	total := comparison.GetTotalCommits()
+	if total < len(commits) {
+		total = len(commits)
+	}
+	if len(commits) > changelogShown {
+		commits = commits[len(commits)-changelogShown:]
+	}
+	if total > len(commits) {
+		sb.WriteString(fmt.Sprintf("*Showing last %d of %d commits*\n\n", len(commits), total))
 	}
 
 	for _, commit := range commits {
@@ -191,6 +227,10 @@ func handleChangelogAutocomplete(s *discordgo.Session, i *discordgo.InteractionC
 
 	choices := make([]*discordgo.ApplicationCommandOptionChoice, 0, 25)
 	for _, release := range releaseCache {
+		// A token with push access also lists unpublished drafts.
+		if release.GetDraft() {
+			continue
+		}
 		tagName := release.GetTagName()
 		if currentInput == "" || strings.Contains(strings.ToLower(tagName), currentInput) {
 			choices = append(choices, &discordgo.ApplicationCommandOptionChoice{

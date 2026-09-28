@@ -84,7 +84,10 @@ type ModalState struct {
 }
 
 type ModalsConfig struct {
-	Modals []ModalConfig `yaml:"config"`
+	// DefaultRepo is "owner/repo" for /changelog and a bare /repo. Without it
+	// they take the first template's repository, so reordering the list moves them.
+	DefaultRepo string        `yaml:"default_repo"`
+	Modals      []ModalConfig `yaml:"config"`
 }
 
 // UnmarshalYAML custom unmarshals an Option from either a string or an object
@@ -113,11 +116,15 @@ func (o *Option) UnmarshalYAML(value *yaml.Node) error {
 
 var loadedModals *ModalsConfig
 
-// GetOwnerAndRepo returns the owner and repo from the first configured modal template URL
-// Returns empty strings if no template URL is configured
+// GetOwnerAndRepo returns default_repo, or else the owner and repo of the first
+// configured template URL. Returns empty strings if neither is configured.
 func GetOwnerAndRepo() (string, string) {
 	if loadedModals == nil {
 		return "", ""
+	}
+
+	if owner, repo, ok := strings.Cut(strings.TrimSpace(loadedModals.DefaultRepo), "/"); ok && owner != "" && repo != "" {
+		return owner, repo
 	}
 
 	// Find the first modal with a template URL
