@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/go-github/v90/github"
 )
@@ -103,5 +104,38 @@ func TestFindSubmissionPagesUntilTheMarkerOrTheFirstAttempt(t *testing.T) {
 	}
 	if len(pages) != 2 {
 		t.Errorf("fetched pages %v; the walk must stop at an issue older than the first attempt", pages)
+	}
+}
+
+func TestSimilarIssuesQueryKeepsQualifiersAndLimit(t *testing.T) {
+	q := similarIssuesQuery("meshtastic", "Meshtastic-Android", "  Waypoint\n notifications   "+strings.Repeat("é", 300))
+	if !strings.HasPrefix(q, "repo:meshtastic/Meshtastic-Android is:issue Waypoint notifications ") {
+		t.Errorf("query lost its qualifiers or spacing: %q", q)
+	}
+	if len(q) > searchQueryLimit || !utf8.ValidString(q) {
+		t.Errorf("query is %d bytes or not valid UTF-8; GitHub caps it at %d", len(q), searchQueryLimit)
+	}
+}
+
+func TestSimilarIssuesAsksForSemanticSearch(t *testing.T) {
+	var got *http.Request
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		got = r
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"total_count": 1, "items": [{"number": 5326, "title": "Waypoint notifications", "state": "open", "html_url": "https://github.com/meshtastic/Meshtastic-Android/issues/5326"}]}`))
+	})
+
+	issues, err := c.SimilarIssues("meshtastic", "Meshtastic-Android", "Waypoint notifications", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.URL.Path != "/search/issues" || got.URL.Query().Get("search_type") != "semantic" || got.URL.Query().Get("per_page") != "3" {
+		t.Errorf("request = %s", got.URL)
+	}
+	if q := got.URL.Query().Get("q"); !strings.Contains(q, "repo:meshtastic/Meshtastic-Android is:issue") {
+		t.Errorf("q = %q", q)
+	}
+	if len(issues) != 1 || issues[0].Number != 5326 || issues[0].State != "open" {
+		t.Errorf("issues = %+v", issues)
 	}
 }

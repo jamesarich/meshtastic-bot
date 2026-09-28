@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/go-github/v90/github"
 )
@@ -26,6 +27,50 @@ type Client interface {
 	CreateIssue(owner, repo, title, body string, labels []string) (*IssueResponse, error)
 	GetRepository(owner, repo string) (*github.Repository, error)
 	FindSubmission(owner, repo, marker string, since time.Time) (*IssueResponse, error)
+	SimilarIssues(owner, repo, text string, limit int) ([]SimilarIssue, error)
+}
+
+// SimilarIssue is an existing issue offered as a possible duplicate.
+type SimilarIssue struct {
+	Number int
+	Title  string
+	State  string
+	URL    string
+}
+
+// searchQueryLimit is GitHub's cap on a search query, qualifiers included.
+const searchQueryLimit = 256
+
+// SimilarIssues returns the issues GitHub's semantic search ranks closest to
+// text, open or closed; a closed duplicate is still the answer.
+func (c *LiveGitHubClient) SimilarIssues(owner, repo, text string, limit int) ([]SimilarIssue, error) {
+	ctx, cancel := context.WithTimeout(c.ctx, apiTimeout)
+	defer cancel()
+	result, _, err := c.client.Search.Issues(ctx, similarIssuesQuery(owner, repo, text), &github.SearchOptions{
+		SearchType:  "semantic",
+		ListOptions: github.ListOptions{PerPage: limit},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to search issues: %w", err)
+	}
+	var out []SimilarIssue
+	for _, issue := range result.Issues {
+		out = append(out, SimilarIssue{Number: issue.GetNumber(), Title: issue.GetTitle(), State: issue.GetState(), URL: issue.GetHTMLURL()})
+	}
+	return out, nil
+}
+
+// similarIssuesQuery keeps is:issue, without which the search falls back from
+// semantic to lexical, and the whole query within GitHub's limit.
+func similarIssuesQuery(owner, repo, text string) string {
+	qualifiers := fmt.Sprintf("repo:%s/%s is:issue ", owner, repo)
+	room := searchQueryLimit - len(qualifiers)
+	text = strings.Join(strings.Fields(text), " ")
+	for len(text) > room {
+		_, size := utf8.DecodeLastRuneInString(text)
+		text = text[:len(text)-size]
+	}
+	return qualifiers + text
 }
 
 type CachedRepository struct {

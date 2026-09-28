@@ -24,11 +24,19 @@ type MockGitHubClient struct {
 	CreateIssueFunc    func(owner, repo, title, body string, labels []string) (*internalgithub.IssueResponse, error)
 	GetRepositoryFunc  func(owner, repo string) (*gogithub.Repository, error)
 	FindSubmissionFunc func(owner, repo, marker string, since time.Time) (*internalgithub.IssueResponse, error)
+	SimilarIssuesFunc  func(owner, repo, text string, limit int) ([]internalgithub.SimilarIssue, error)
 }
 
 func (m *MockGitHubClient) FindSubmission(owner, repo, marker string, since time.Time) (*internalgithub.IssueResponse, error) {
 	if m.FindSubmissionFunc != nil {
 		return m.FindSubmissionFunc(owner, repo, marker, since)
+	}
+	return nil, nil
+}
+
+func (m *MockGitHubClient) SimilarIssues(owner, repo, text string, limit int) ([]internalgithub.SimilarIssue, error) {
+	if m.SimilarIssuesFunc != nil {
+		return m.SimilarIssuesFunc(owner, repo, text, limit)
 	}
 	return nil, nil
 }

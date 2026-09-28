@@ -36,6 +36,8 @@ func InitializeGithub(token, owner, repo string) error {
 type ModalState struct {
 	// Title is the reporter's text, used for the GitHub issue.
 	Title string
+	// SearchText is the reporter's own title, searched for duplicates.
+	SearchText string
 	// DisplayTitle heads the dialog. Discord limits that to 45 characters and
 	// Title is arbitrary text, so the two cannot share a field.
 	DisplayTitle    string
