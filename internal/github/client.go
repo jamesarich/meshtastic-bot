@@ -55,20 +55,35 @@ func (c *LiveGitHubClient) FindSubmission(owner, repo, marker string, since time
 	if err != nil {
 		return nil, err
 	}
-	issues, _, err := c.client.Issues.ListByRepo(ctx, owner, repo, &github.IssueListByRepoOptions{
+	opts := &github.IssueListByRepoOptions{
 		Creator: login, State: "all", Since: since, Sort: "created", Direction: "desc",
-		ListOptions: github.ListOptions{PerPage: 50},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to list recent issues: %w", err)
+		ListOptions: github.ListOptions{PerPage: 100},
 	}
-	for _, issue := range issues {
-		if strings.Contains(issue.GetBody(), marker) {
-			return &IssueResponse{Number: issue.GetNumber(), HTMLURL: issue.GetHTMLURL(), ID: issue.GetID()}, nil
+	for range findSubmissionPages {
+		issues, resp, err := c.client.Issues.ListByRepo(ctx, owner, repo, opts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list recent issues: %w", err)
 		}
+		for _, issue := range issues {
+			if strings.Contains(issue.GetBody(), marker) {
+				return &IssueResponse{Number: issue.GetNumber(), HTMLURL: issue.GetHTMLURL(), ID: issue.GetID()}, nil
+			}
+			// Newest first: everything after this predates the first attempt.
+			if issue.GetCreatedAt().Before(since) {
+				return nil, nil
+			}
+		}
+		if resp.NextPage == 0 {
+			return nil, nil
+		}
+		opts.Page = resp.NextPage
 	}
-	return nil, nil
+	// Not found but not ruled out either; the caller files nothing on error.
+	return nil, fmt.Errorf("more than %d pages of recent issues to check", findSubmissionPages)
 }
+
+// findSubmissionPages bounds FindSubmission's walk through the issue list.
+const findSubmissionPages = 5
 
 func (c *LiveGitHubClient) tokenLogin(ctx context.Context) (string, error) {
 	c.loginMu.Lock()
