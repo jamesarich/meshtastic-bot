@@ -1,0 +1,233 @@
+package handlers
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"strings"
+	"sync"
+	"testing"
+
+	internalgithub "github.com/meshtastic/meshtastic-bot/internal/github"
+
+	"github.com/bwmarrin/discordgo"
+)
+
+// submitRecorder captures what a submission sends to Discord, in order.
+type submitRecorder struct {
+	mu        sync.Mutex
+	responses []discordgo.InteractionResponse
+	edits     []editRecord
+}
+
+// editRecord keeps components raw: MessageComponent is an interface and does
+// not decode back into Go.
+type editRecord struct {
+	Content    *string         `json:"content"`
+	Components json.RawMessage `json:"components"`
+}
+
+func (r *submitRecorder) session(t *testing.T) *discordgo.Session {
+	s, _ := discordgo.New("")
+	s.Client = &http.Client{
+		Transport: &MockRoundTripper{
+			RoundTripFunc: func(req *http.Request) (*http.Response, error) {
+				r.mu.Lock()
+				defer r.mu.Unlock()
+				if strings.Contains(req.URL.Path, "/callback") {
+					var resp discordgo.InteractionResponse
+					if err := json.NewDecoder(req.Body).Decode(&resp); err != nil {
+						t.Errorf("Failed to decode response: %v", err)
+					}
+					r.responses = append(r.responses, resp)
+				} else if req.Method == "PATCH" {
+					var edit editRecord
+					if err := json.NewDecoder(req.Body).Decode(&edit); err != nil {
+						t.Errorf("Failed to decode edit: %v", err)
+					}
+					r.edits = append(r.edits, edit)
+				}
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewBufferString("{}")), Header: make(http.Header)}, nil
+			},
+		},
+	}
+	return s
+}
+
+func (r *submitRecorder) lastEdit(t *testing.T) editRecord {
+	t.Helper()
+	if len(r.edits) == 0 {
+		t.Fatal("no reply edit was sent")
+	}
+	return r.edits[len(r.edits)-1]
+}
+
+func submitInteraction() *discordgo.InteractionCreate {
+	return &discordgo.InteractionCreate{Interaction: &discordgo.Interaction{
+		Type:   discordgo.InteractionModalSubmit,
+		Member: &discordgo.Member{User: &discordgo.User{ID: "42", Username: "reporter"}},
+	}}
+}
+
+func retryInteraction(stateKey string) *discordgo.InteractionCreate {
+	return &discordgo.InteractionCreate{Interaction: &discordgo.Interaction{
+		Type:   discordgo.InteractionMessageComponent,
+		Data:   discordgo.MessageComponentInteractionData{CustomID: retryPrefix + stateKey},
+		Member: &discordgo.Member{User: &discordgo.User{ID: "42", Username: "reporter"}},
+	}}
+}
+
+func filedState(key string) *ModalState {
+	state := &ModalState{
+		Title:           "Crash on boot",
+		SubmittedValues: map[string]string{"What happened?": "it crashed"},
+		Command:         "bug",
+		Owner:           "meshtastic",
+		Repo:            "web",
+	}
+	putModalState(key, state)
+	return state
+}
+
+func withGithubClient(t *testing.T, c internalgithub.Client) {
+	t.Helper()
+	original := GithubClient
+	GithubClient = c
+	t.Cleanup(func() { GithubClient = original })
+}
+
+func TestCreateIssueFromStateAcknowledgesBeforeFiling(t *testing.T) {
+	resetModalStates()
+	key := "bug_c_42"
+	state := filedState(key)
+
+	rec := &submitRecorder{}
+	withGithubClient(t, &MockGitHubClient{
+		CreateIssueFunc: func(owner, repo, title, body string, labels []string) (*internalgithub.IssueResponse, error) {
+			if len(rec.responses) != 1 {
+				t.Errorf("CreateIssue ran before the submission was acknowledged")
+			}
+			return &internalgithub.IssueResponse{Number: 7, HTMLURL: "https://github.com/meshtastic/web/issues/7"}, nil
+		},
+	})
+
+	createIssueFromState(rec.session(t), submitInteraction(), state, key)
+
+	if len(rec.responses) != 1 || rec.responses[0].Type != discordgo.InteractionResponseDeferredChannelMessageWithSource ||
+		rec.responses[0].Data == nil || rec.responses[0].Data.Flags&discordgo.MessageFlagsEphemeral == 0 {
+		t.Fatalf("want one deferred ephemeral acknowledgement, got %+v", rec.responses)
+	}
+	if edit := rec.lastEdit(t); edit.Content == nil || !strings.Contains(*edit.Content, "issues/7") {
+		t.Errorf("reply does not link the issue: %+v", edit)
+	}
+	if _, ok := lookupModalState(key); ok {
+		t.Error("state kept after the issue was filed")
+	}
+}
+
+func TestFailedFilingKeepsAnswersAndRetryFilesThem(t *testing.T) {
+	resetModalStates()
+	key := "bug_c_42"
+	state := filedState(key)
+
+	calls := 0
+	rec := &submitRecorder{}
+	withGithubClient(t, &MockGitHubClient{
+		CreateIssueFunc: func(owner, repo, title, body string, labels []string) (*internalgithub.IssueResponse, error) {
+			calls++
+			if !strings.Contains(body, "it crashed") {
+				t.Errorf("the retried report lost its answers: %q", body)
+			}
+			if calls == 1 {
+				return nil, errors.New("github API returned 502")
+			}
+			return &internalgithub.IssueResponse{Number: 8, HTMLURL: "https://github.com/meshtastic/web/issues/8"}, nil
+		},
+	})
+
+	createIssueFromState(rec.session(t), submitInteraction(), state, key)
+
+	edit := rec.lastEdit(t)
+	if !strings.Contains(string(edit.Components), retryPrefix+key) {
+		t.Fatalf("failure reply has no Retry button: %+v", edit)
+	}
+	if _, ok := lookupModalState(key); !ok {
+		t.Fatal("answers dropped after a failed filing")
+	}
+
+	handleButtonClick(rec.session(t), retryInteraction(key))
+
+	if calls != 2 {
+		t.Fatalf("Retry called CreateIssue %d times in total, want 2", calls)
+	}
+	last := rec.responses[len(rec.responses)-1]
+	if last.Type != discordgo.InteractionResponseDeferredMessageUpdate {
+		t.Errorf("Retry must defer a message update, got type %d", last.Type)
+	}
+	edit = rec.lastEdit(t)
+	if edit.Content == nil || !strings.Contains(*edit.Content, "issues/8") {
+		t.Errorf("retry reply does not link the issue: %+v", edit)
+	}
+	if string(edit.Components) != "[]" {
+		t.Errorf("the Retry button must be cleared on success: %s", edit.Components)
+	}
+}
+
+func TestRetryAfterExpiryFilesNothing(t *testing.T) {
+	resetModalStates()
+	withGithubClient(t, &MockGitHubClient{
+		CreateIssueFunc: func(owner, repo, title, body string, labels []string) (*internalgithub.IssueResponse, error) {
+			t.Error("CreateIssue called for an expired submission")
+			return nil, errors.New("unexpected")
+		},
+	})
+	rec := &submitRecorder{}
+	handleButtonClick(rec.session(t), retryInteraction("bug_c_42"))
+	if len(rec.responses) != 1 || rec.responses[0].Type != discordgo.InteractionResponseUpdateMessage {
+		t.Errorf("want one message update saying the session expired, got %+v", rec.responses)
+	}
+}
+
+func TestFileIssueRefusesASecondConcurrentFiling(t *testing.T) {
+	resetModalStates()
+	key := "bug_c_42"
+	state := filedState(key)
+	if !state.startFiling() {
+		t.Fatal("first claim failed")
+	}
+	withGithubClient(t, &MockGitHubClient{
+		CreateIssueFunc: func(owner, repo, title, body string, labels []string) (*internalgithub.IssueResponse, error) {
+			t.Error("a second filing reached GitHub")
+			return nil, errors.New("unexpected")
+		},
+	})
+	rec := &submitRecorder{}
+	fileIssue(rec.session(t), submitInteraction(), state, key)
+	if edit := rec.lastEdit(t); edit.Content == nil || !strings.Contains(*edit.Content, "already being filed") {
+		t.Errorf("want the already-filing reply, got %+v", edit)
+	}
+}
+
+func TestCollectSubmittedValuesIsSafeConcurrently(t *testing.T) {
+	state := &ModalState{SubmittedValues: map[string]string{}}
+	components := func(id string) []discordgo.MessageComponent {
+		return []discordgo.MessageComponent{&discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+			&discordgo.TextInput{CustomID: id, Value: "v"},
+		}}}
+	}
+	var wg sync.WaitGroup
+	for n := 0; n < 50; n++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			collectSubmittedValues(state, components(string(rune('a'+n%26))))
+			_ = state.answeredCount()
+		}(n)
+	}
+	wg.Wait()
+	if got := state.answeredCount(); got != 26 {
+		t.Errorf("answered = %d, want 26", got)
+	}
+}

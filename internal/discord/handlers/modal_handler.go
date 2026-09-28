@@ -10,19 +10,42 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
+// retryPrefix marks the button that re-files a report after GitHub failed.
+const retryPrefix = "retry_"
+
 func createIssueFromState(s *discordgo.Session, i *discordgo.InteractionCreate, state *ModalState, stateKey string) {
-	body := buildIssueBody(state.AllFields, state.SubmittedValues, i.Member.User.Username, i.Member.User.ID)
+	// Acknowledge before calling GitHub: CreateIssue can outlast Discord's 3 s
+	// window, and a reporter shown "interaction failed" files the report again.
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral},
+	})
+	if err != nil {
+		log.Printf("Error deferring the %s submission: %v", state.Command, err)
+	}
+	fileIssue(s, i, state, stateKey)
+}
+
+// fileIssue creates the issue and edits the deferred reply with the outcome.
+// On failure the answers are kept and the reply offers a Retry button.
+func fileIssue(s *discordgo.Session, i *discordgo.InteractionCreate, state *ModalState, stateKey string) {
+	if !state.startFiling() {
+		editReply(s, i, "This report is already being filed.", nil)
+		return
+	}
+
+	values := state.answers()
+	body := buildIssueBody(state.AllFields, values, i.Member.User.Username, i.Member.User.ID)
 	issue, err := GithubClient.CreateIssue(state.Owner, state.Repo, state.Title, body, state.Labels)
 	if err != nil {
 		log.Printf("Failed to create GitHub issue: %v", err)
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: "❌ Failed to create issue. Please try again later.",
-				Flags:   discordgo.MessageFlagsEphemeral,
-			},
-		})
-		dropModalState(stateKey)
+		state.stopFiling()
+		editReply(s, i, "❌ The issue could not be created. Your answers are kept for 30 minutes, so press Retry to try again.",
+			[]discordgo.MessageComponent{
+				discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+					discordgo.Button{Label: "Retry", Style: discordgo.PrimaryButton, CustomID: retryPrefix + stateKey},
+				}},
+			})
 		return
 	}
 
@@ -36,15 +59,19 @@ func createIssueFromState(s *discordgo.Session, i *discordgo.InteractionCreate, 
 		"\n\nThis issue is public and records your Discord username and user ID. See the " +
 		"[privacy policy](<https://github.com/meshtastic/meshtastic-bot/blob/main/PRIVACY.md>)."
 
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: confirmationMessage,
-			Flags:   discordgo.MessageFlagsEphemeral,
-		},
-	})
-
+	editReply(s, i, confirmationMessage, []discordgo.MessageComponent{})
 	dropModalState(stateKey)
+}
+
+// editReply replaces a deferred reply; empty components clear a Retry button.
+func editReply(s *discordgo.Session, i *discordgo.InteractionCreate, content string, components []discordgo.MessageComponent) {
+	edit := &discordgo.WebhookEdit{Content: &content}
+	if components != nil {
+		edit.Components = &components
+	}
+	if _, err := s.InteractionResponseEdit(i.Interaction, edit); err != nil {
+		log.Printf("Error editing the submission reply: %v", err)
+	}
 }
 
 func handleModalSubmit(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -74,7 +101,7 @@ func handleModalSubmit(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	if hasState {
 		collectSubmittedValues(state, data.Components)
 
-		currentIndex := len(state.SubmittedValues)
+		currentIndex := state.answeredCount()
 
 		// Check if there are more fields to show
 		if currentIndex < len(state.AllFields) {
@@ -147,7 +174,7 @@ func handleModalContinuation(s *discordgo.Session, i *discordgo.InteractionCreat
 	data := i.ModalSubmitData()
 	collectSubmittedValues(state, data.Components)
 
-	currentIndex := len(state.SubmittedValues)
+	currentIndex := state.answeredCount()
 
 	// Check if there are more fields to show
 	if currentIndex < len(state.AllFields) {
@@ -187,6 +214,28 @@ func handleModalContinuation(s *discordgo.Session, i *discordgo.InteractionCreat
 func handleButtonClick(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	customID := i.MessageComponentData().CustomID
 
+	if strings.HasPrefix(customID, retryPrefix) {
+		stateKey := strings.TrimPrefix(customID, retryPrefix)
+		state, exists := lookupModalState(stateKey)
+		if !exists {
+			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseUpdateMessage,
+				Data: &discordgo.InteractionResponseData{
+					Content:    "❌ Session expired, so no issue was created. Please run the command again.",
+					Components: []discordgo.MessageComponent{},
+				},
+			})
+			return
+		}
+		if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseDeferredMessageUpdate,
+		}); err != nil {
+			log.Printf("Error deferring the %s retry: %v", state.Command, err)
+		}
+		fileIssue(s, i, state, stateKey)
+		return
+	}
+
 	// Check if this is a continue button
 	if strings.HasPrefix(customID, "continue_") {
 		stateKey := strings.TrimPrefix(customID, "continue_")
@@ -204,7 +253,7 @@ func handleButtonClick(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 
 		// Show the next modal chunk
-		currentIndex := len(state.SubmittedValues)
+		currentIndex := state.answeredCount()
 		endIndex := currentIndex + 5
 		if endIndex > len(state.AllFields) {
 			endIndex = len(state.AllFields)

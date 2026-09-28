@@ -59,6 +59,8 @@ func dialogTitle(state *ModalState) string {
 // not the other: it would have been stored as an answered field, adding an
 // empty section to the issue body and throwing off which part comes next.
 func collectSubmittedValues(state *ModalState, components []discordgo.MessageComponent) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
 	for _, component := range components {
 		actionRow, ok := component.(*discordgo.ActionsRow)
 		if !ok {

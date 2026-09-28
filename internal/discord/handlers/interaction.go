@@ -40,6 +40,46 @@ type ModalState struct {
 	ChannelID       string
 	Owner           string
 	Repo            string
+
+	// mu guards SubmittedValues and filing: two submits of the same dialog
+	// arrive on separate goroutines.
+	mu     sync.Mutex
+	filing bool
+}
+
+// startFiling claims the report for one CreateIssue call at a time, so a
+// double submit cannot file it twice.
+func (st *ModalState) startFiling() bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.filing {
+		return false
+	}
+	st.filing = true
+	return true
+}
+
+func (st *ModalState) stopFiling() {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.filing = false
+}
+
+func (st *ModalState) answeredCount() int {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return len(st.SubmittedValues)
+}
+
+// answers returns a copy of SubmittedValues that is safe to read unlocked.
+func (st *ModalState) answers() map[string]string {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	out := make(map[string]string, len(st.SubmittedValues))
+	for k, v := range st.SubmittedValues {
+		out[k] = v
+	}
+	return out
 }
 
 // modalStates is keyed by command, channel and user.
