@@ -9,12 +9,24 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/go-github/v57/github"
+	"github.com/google/go-github/v90/github"
 )
+
+func testClient(t *testing.T, handler http.HandlerFunc) *LiveGitHubClient {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	base := srv.URL + "/"
+	gh, err := github.NewClient(github.WithURLs(&base, &base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &LiveGitHubClient{client: gh, ctx: t.Context(), repoCache: map[string]*CachedRepository{}}
+}
 
 func TestFindSubmissionMatchesTheMarkerInTheTokensRecentIssues(t *testing.T) {
 	var listed url.Values
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/user":
@@ -28,13 +40,7 @@ func TestFindSubmissionMatchesTheMarkerInTheTokensRecentIssues(t *testing.T) {
 		default:
 			http.NotFound(w, r)
 		}
-	}))
-	defer srv.Close()
-
-	gh := github.NewClient(nil)
-	base, _ := url.Parse(srv.URL + "/")
-	gh.BaseURL = base
-	c := &LiveGitHubClient{client: gh, ctx: t.Context(), repoCache: map[string]*CachedRepository{}}
+	})
 
 	since := time.Date(2026, 9, 28, 20, 0, 0, 0, time.UTC)
 	got, err := c.FindSubmission("meshtastic", "web", "<!-- meshtastic-bot submission abc -->", since)
@@ -59,7 +65,7 @@ func TestFindSubmissionPagesUntilTheMarkerOrTheFirstAttempt(t *testing.T) {
 		return fmt.Sprintf(`{"number": %d, "created_at": %q, "body": %q}`, n, created.Format(time.RFC3339), body)
 	}
 	var pages []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/user" {
 			w.Write([]byte(`{"login": "MeshtasticAutomation"}`))
@@ -83,13 +89,7 @@ func TestFindSubmissionPagesUntilTheMarkerOrTheFirstAttempt(t *testing.T) {
 			t.Errorf("fetched page %q", page)
 			w.Write([]byte("[]"))
 		}
-	}))
-	defer srv.Close()
-
-	gh := github.NewClient(nil)
-	base, _ := url.Parse(srv.URL + "/")
-	gh.BaseURL = base
-	c := &LiveGitHubClient{client: gh, ctx: t.Context(), repoCache: map[string]*CachedRepository{}}
+	})
 
 	got, err := c.FindSubmission("meshtastic", "web", "<!-- meshtastic-bot submission abc -->", since)
 	if err != nil || got == nil || got.Number != 42 {

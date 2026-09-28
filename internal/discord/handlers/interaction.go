@@ -21,10 +21,15 @@ var (
 	GithubRepo   string
 )
 
-func InitializeGithub(token, owner, repo string) {
-	GithubClient = github.NewClient(token)
+func InitializeGithub(token, owner, repo string) error {
+	client, err := github.NewClient(token)
+	if err != nil {
+		return err
+	}
+	GithubClient = client
 	GithubOwner = owner
 	GithubRepo = repo
+	return nil
 }
 
 // ModalState tracks the state of multi-part modals
