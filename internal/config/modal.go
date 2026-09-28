@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/bwmarrin/discordgo"
 	"gopkg.in/yaml.v3"
@@ -215,11 +216,16 @@ func ConvertGitHubFieldToFieldConfig(field GitHubTemplateField) *FieldConfig {
 		style = "paragraph"
 	}
 
+	placeholder := field.Attributes.Placeholder
+	if field.Type == "dropdown" && placeholder == "" {
+		placeholder = dropdownPlaceholder(field.Attributes)
+	}
+
 	config := &FieldConfig{
 		CustomID:    field.ID,
 		Label:       field.Attributes.Label,
 		Style:       style,
-		Placeholder: field.Attributes.Placeholder,
+		Placeholder: truncateRunes(placeholder, discordPlaceholderLimit),
 		Required:    field.Validations.Required,
 	}
 
@@ -234,6 +240,47 @@ func ConvertGitHubFieldToFieldConfig(field GitHubTemplateField) *FieldConfig {
 	}
 
 	return config
+}
+
+// discordPlaceholderLimit is Discord's cap on a text input placeholder, in characters.
+const discordPlaceholderLimit = 100
+
+// dropdownPlaceholder lists a dropdown's options, since the modal renders it as a plain text box.
+func dropdownPlaceholder(attrs FieldAttributes) string {
+	if len(attrs.Options) == 0 {
+		return ""
+	}
+	text := "One of: "
+	if attrs.Multiple {
+		text = "One or more of: "
+	}
+	const more = ", …"
+	for i, opt := range attrs.Options {
+		next := opt.Label
+		if i > 0 {
+			next = ", " + next
+		}
+		room := discordPlaceholderLimit
+		if i < len(attrs.Options)-1 {
+			room -= utf8.RuneCountInString(more)
+		}
+		if utf8.RuneCountInString(text+next) > room {
+			if i == 0 {
+				return text + "…"
+			}
+			return text + more
+		}
+		text += next
+	}
+	return text
+}
+
+func truncateRunes(s string, limit int) string {
+	r := []rune(s)
+	if len(r) <= limit {
+		return s
+	}
+	return string(r[:limit-1]) + "…"
 }
 
 // GetAllFieldsForModal returns all fields for a modal config (used for multi-part modals)

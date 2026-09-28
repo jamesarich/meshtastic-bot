@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -207,5 +208,66 @@ func TestNoticeComponent(t *testing.T) {
 	if !strings.Contains(strings.ToLower(input.Label+" "+input.Placeholder), "public") {
 		t.Errorf("the notice must say the issue is public, got label %q placeholder %q",
 			input.Label, input.Placeholder)
+	}
+}
+
+func dropdown(multiple bool, labels ...string) GitHubTemplateField {
+	opts := make([]Option, len(labels))
+	for i, l := range labels {
+		opts[i] = Option{Label: l}
+	}
+	return GitHubTemplateField{
+		Type:       "dropdown",
+		ID:         "pick",
+		Attributes: FieldAttributes{Label: "Pick", Options: opts, Multiple: multiple},
+	}
+}
+
+func TestConvertGitHubFieldToFieldConfig_DropdownListsOptions(t *testing.T) {
+	tests := []struct {
+		name  string
+		field GitHubTemplateField
+		want  string
+	}{
+		{"single choice", dropdown(false, "Nice to have", "Important", "Critical"), "One of: Nice to have, Important, Critical"},
+		{"multiple choice", dropdown(true, "HTTP", "Bluetooth", "Serial"), "One or more of: HTTP, Bluetooth, Serial"},
+		{"no options", dropdown(false), ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ConvertGitHubFieldToFieldConfig(tt.field)
+			if got == nil || got.Placeholder != tt.want {
+				t.Fatalf("placeholder = %+v, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestConvertGitHubFieldToFieldConfig_DropdownPlaceholderFitsDiscord(t *testing.T) {
+	labels := make([]string, 30)
+	for i := range labels {
+		labels[i] = "T-Beam Supreme ☢ " + string(rune('A'+i))
+	}
+	got := ConvertGitHubFieldToFieldConfig(dropdown(true, labels...)).Placeholder
+	if n := utf8.RuneCountInString(got); n > discordPlaceholderLimit {
+		t.Fatalf("placeholder is %d characters, over %d: %q", n, discordPlaceholderLimit, got)
+	}
+	if !strings.HasPrefix(got, "One or more of: T-Beam Supreme ☢ A, ") || !strings.HasSuffix(got, ", …") {
+		t.Fatalf("want whole options then an ellipsis, got %q", got)
+	}
+	if strings.Contains(strings.TrimSuffix(got, ", …"), "…") {
+		t.Fatalf("an option was cut mid-label: %q", got)
+	}
+}
+
+func TestConvertGitHubFieldToFieldConfig_TemplatePlaceholderTruncatedByRune(t *testing.T) {
+	field := GitHubTemplateField{
+		Type:       "input",
+		ID:         "long",
+		Attributes: FieldAttributes{Label: "Long", Placeholder: strings.Repeat("é", 150)},
+	}
+	got := ConvertGitHubFieldToFieldConfig(field).Placeholder
+	if !utf8.ValidString(got) || utf8.RuneCountInString(got) != discordPlaceholderLimit {
+		t.Fatalf("placeholder not cut to %d whole characters: %q", discordPlaceholderLimit, got)
 	}
 }
