@@ -3,9 +3,12 @@ package config
 import (
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/bwmarrin/discordgo"
@@ -155,9 +158,84 @@ func LoadModals(ConfigPath string) error {
 	return nil
 }
 
-// FetchGitHubTemplate fetches and parses a GitHub issue template from a TemplateURL
+// templateCacheTTL is how long a fetched template is served before a refresh.
+// /bug and /feature must answer within Discord's 3 s window, so an expired
+// entry is still served while the refresh runs in the background.
+const templateCacheTTL = 10 * time.Minute
+
+var (
+	templateHTTP    = &http.Client{Timeout: 10 * time.Second}
+	templateCacheMu sync.Mutex
+	templateCache   = map[string]*cachedTemplate{}
+)
+
+type cachedTemplate struct {
+	template   *GitHubIssueTemplate
+	fetched    time.Time
+	refreshing bool
+}
+
+// FetchGitHubTemplate returns a template from the cache, fetching it on first
+// use. The result is shared; callers must not modify it.
 func FetchGitHubTemplate(templateURL *TemplateURL) (*GitHubIssueTemplate, error) {
-	resp, err := http.Get(templateURL.RawURL())
+	url := templateURL.RawURL()
+
+	templateCacheMu.Lock()
+	entry, ok := templateCache[url]
+	if ok {
+		if time.Since(entry.fetched) >= templateCacheTTL && !entry.refreshing {
+			entry.refreshing = true
+			go refreshTemplate(url)
+		}
+		templateCacheMu.Unlock()
+		return entry.template, nil
+	}
+	templateCacheMu.Unlock()
+
+	template, err := fetchTemplate(url)
+	if err != nil {
+		return nil, err
+	}
+	templateCacheMu.Lock()
+	templateCache[url] = &cachedTemplate{template: template, fetched: time.Now()}
+	templateCacheMu.Unlock()
+	return template, nil
+}
+
+func refreshTemplate(url string) {
+	template, err := fetchTemplate(url)
+	templateCacheMu.Lock()
+	defer templateCacheMu.Unlock()
+	entry := templateCache[url]
+	entry.refreshing = false
+	if err != nil {
+		// Try again in a minute rather than on every command during an outage.
+		entry.fetched = time.Now().Add(time.Minute - templateCacheTTL)
+		log.Printf("Keeping the cached template after a failed refresh: %v", err)
+		return
+	}
+	entry.template = template
+	entry.fetched = time.Now()
+}
+
+// PrefetchTemplates warms the cache so the first /bug or /feature does not
+// wait on GitHub. A failure is logged; the command fetches again on use.
+func PrefetchTemplates() {
+	if loadedModals == nil {
+		return
+	}
+	for _, modal := range loadedModals.Modals {
+		if modal.TemplateURL == nil {
+			continue
+		}
+		if _, err := FetchGitHubTemplate(modal.TemplateURL); err != nil {
+			log.Printf("Could not prefetch the %s template: %v", modal.Command, err)
+		}
+	}
+}
+
+func fetchTemplate(url string) (*GitHubIssueTemplate, error) {
+	resp, err := templateHTTP.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch template: %w", err)
 	}
@@ -165,7 +243,7 @@ func FetchGitHubTemplate(templateURL *TemplateURL) (*GitHubIssueTemplate, error)
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("failed to fetch template from %s: status code %d",
-			templateURL.RawURL(), resp.StatusCode)
+			url, resp.StatusCode)
 	}
 
 	data, err := io.ReadAll(resp.Body)

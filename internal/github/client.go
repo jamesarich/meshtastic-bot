@@ -14,6 +14,10 @@ import (
 const (
 	// RepositoryCacheTTL defines how long repository metadata is cached
 	RepositoryCacheTTL = 4 * time.Hour
+
+	// apiTimeout bounds each call. Handlers hold cache locks across them, so an
+	// unbounded hang would stall every /changelog and /repo behind it.
+	apiTimeout = 10 * time.Second
 )
 
 type Client interface {
@@ -66,7 +70,9 @@ func (c *LiveGitHubClient) GetReleases(owner, repo string, limit int) ([]*github
 	opts := &github.ListOptions{
 		PerPage: limit,
 	}
-	releases, _, err := c.client.Repositories.ListReleases(c.ctx, owner, repo, opts)
+	ctx, cancel := context.WithTimeout(c.ctx, apiTimeout)
+	defer cancel()
+	releases, _, err := c.client.Repositories.ListReleases(ctx, owner, repo, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list releases: %w", err)
 	}
@@ -74,7 +80,9 @@ func (c *LiveGitHubClient) GetReleases(owner, repo string, limit int) ([]*github
 }
 
 func (c *LiveGitHubClient) CompareCommits(owner, repo, base, head string) (*github.CommitsComparison, error) {
-	comparison, resp, err := c.client.Repositories.CompareCommits(c.ctx, owner, repo, base, head, nil)
+	ctx, cancel := context.WithTimeout(c.ctx, apiTimeout)
+	defer cancel()
+	comparison, resp, err := c.client.Repositories.CompareCommits(ctx, owner, repo, base, head, nil)
 	if err != nil {
 		if resp != nil {
 			return nil, fmt.Errorf("github API returned %d: failed to compare commits: %w", resp.StatusCode, err)
@@ -99,7 +107,9 @@ func (c *LiveGitHubClient) CreateIssue(owner, repo, title, body string, labels [
 		req.Labels = &labels
 	}
 
-	issue, resp, err := c.client.Issues.Create(c.ctx, owner, repo, req)
+	ctx, cancel := context.WithTimeout(c.ctx, apiTimeout)
+	defer cancel()
+	issue, resp, err := c.client.Issues.Create(ctx, owner, repo, req)
 	if err != nil {
 		if resp != nil {
 			return nil, fmt.Errorf("github API returned %d: %w", resp.StatusCode, err)
@@ -139,7 +149,9 @@ func (c *LiveGitHubClient) GetRepository(owner, repo string) (*github.Repository
 	}
 
 	// Fetch from GitHub API
-	repository, _, err := c.client.Repositories.Get(c.ctx, owner, repo)
+	ctx, cancel := context.WithTimeout(c.ctx, apiTimeout)
+	defer cancel()
+	repository, _, err := c.client.Repositories.Get(ctx, owner, repo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get repository: %w", err)
 	}

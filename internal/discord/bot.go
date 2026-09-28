@@ -26,6 +26,7 @@ func New(cfg *config.Config, logger *log.Logger) (*DiscordBot, error) {
 	if err := config.LoadModals(cfg.ConfigPath); err != nil {
 		return nil, fmt.Errorf("failed to load modals: %w", err)
 	}
+	config.PrefetchTemplates()
 
 	if _, err := config.LoadFAQ(cfg.FAQPath); err != nil {
 		return nil, fmt.Errorf("failed to load FAQ: %w", err)
