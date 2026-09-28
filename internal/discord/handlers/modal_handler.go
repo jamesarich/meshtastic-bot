@@ -40,6 +40,7 @@ func fileIssue(s *discordgo.Session, i *discordgo.InteractionCreate, state *Moda
 	if err != nil {
 		log.Printf("Failed to create GitHub issue: %v", err)
 		state.stopFiling()
+		renewModalState(stateKey)
 		editReply(s, i, "❌ The issue could not be created. Your answers are kept for 30 minutes, so press Retry to try again.",
 			[]discordgo.MessageComponent{
 				discordgo.ActionsRow{Components: []discordgo.MessageComponent{

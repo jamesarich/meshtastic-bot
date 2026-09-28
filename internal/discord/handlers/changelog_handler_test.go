@@ -23,15 +23,6 @@ type MockGitHubClient struct {
 	CompareCommitsFunc func(owner, repo, base, head string) (*gogithub.CommitsComparison, error)
 	CreateIssueFunc    func(owner, repo, title, body string, labels []string) (*internalgithub.IssueResponse, error)
 	GetRepositoryFunc  func(owner, repo string) (*gogithub.Repository, error)
-
-	CompareCommitsPageFunc func(owner, repo, base, head string, perPage, page int) (*gogithub.CommitsComparison, error)
-}
-
-func (m *MockGitHubClient) CompareCommitsPage(owner, repo, base, head string, perPage, page int) (*gogithub.CommitsComparison, error) {
-	if m.CompareCommitsPageFunc != nil {
-		return m.CompareCommitsPageFunc(owner, repo, base, head, perPage, page)
-	}
-	return nil, errors.New("CompareCommitsPage not mocked")
 }
 
 func (m *MockGitHubClient) GetReleases(owner, repo string, limit int) ([]*gogithub.RepositoryRelease, error) {
@@ -1909,21 +1900,14 @@ func TestGetChangelogMessageListsTheNewestPastTheAPICap(t *testing.T) {
 	comparisonCache = make(map[string]*CachedComparison)
 	comparisonCacheMutex.Unlock()
 
+	// The unpaged API returns the newest 250 of the 537, oldest first: web's
+	// v2.6.4...v2.7.2 ends at ee5243a, the v2.7.2 tag.
 	total := 537
-	var pages []int
+	calls := 0
 	GithubClient = &MockGitHubClient{
 		CompareCommitsFunc: func(owner, repo, base, head string) (*gogithub.CommitsComparison, error) {
-			// The unpaged API returns the oldest 250 and the true total.
-			return &gogithub.CommitsComparison{TotalCommits: gogithub.Int(total), Commits: numberedCommits(1, 250)}, nil
-		},
-		CompareCommitsPageFunc: func(owner, repo, base, head string, perPage, page int) (*gogithub.CommitsComparison, error) {
-			pages = append(pages, page)
-			from := (page-1)*perPage + 1
-			to := from + perPage - 1
-			if to > total {
-				to = total
-			}
-			return &gogithub.CommitsComparison{TotalCommits: gogithub.Int(total), Commits: numberedCommits(from, to)}, nil
+			calls++
+			return &gogithub.CommitsComparison{TotalCommits: gogithub.Int(total), Commits: numberedCommits(288, 537)}, nil
 		},
 	}
 
@@ -1936,14 +1920,14 @@ func TestGetChangelogMessageListsTheNewestPastTheAPICap(t *testing.T) {
 			t.Errorf("newest commit %d missing:\n%s", n, msg)
 		}
 	}
-	if strings.Contains(msg, "commit 250 ") || strings.Contains(msg, "commit 527 ") {
+	if strings.Contains(msg, "commit 527 ") {
 		t.Errorf("older commits listed:\n%s", msg)
 	}
 	if !strings.Contains(msg, "*Showing last 10 of 537 commits*") || !strings.Contains(msg, "in meshtastic/web") {
 		t.Errorf("header does not give the total and repo:\n%s", msg)
 	}
-	if fmt.Sprint(pages) != "[54 53]" {
-		t.Errorf("fetched pages %v, want the last page and the one before it", pages)
+	if calls != 1 {
+		t.Errorf("made %d comparison calls, want 1", calls)
 	}
 }
 

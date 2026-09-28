@@ -23,7 +23,6 @@ const (
 type Client interface {
 	GetReleases(owner, repo string, limit int) ([]*github.RepositoryRelease, error)
 	CompareCommits(owner, repo, base, head string) (*github.CommitsComparison, error)
-	CompareCommitsPage(owner, repo, base, head string, perPage, page int) (*github.CommitsComparison, error)
 	CreateIssue(owner, repo, title, body string, labels []string) (*IssueResponse, error)
 	GetRepository(owner, repo string) (*github.Repository, error)
 }
@@ -89,19 +88,6 @@ func (c *LiveGitHubClient) CompareCommits(owner, repo, base, head string) (*gith
 			return nil, fmt.Errorf("github API returned %d: failed to compare commits: %w", resp.StatusCode, err)
 		}
 		return nil, fmt.Errorf("failed to compare commits: %w", err)
-	}
-	return comparison, nil
-}
-
-// CompareCommitsPage returns one page of a comparison's commits, oldest first.
-// The unpaged comparison stops at 250 commits, and the newest are on the last page.
-func (c *LiveGitHubClient) CompareCommitsPage(owner, repo, base, head string, perPage, page int) (*github.CommitsComparison, error) {
-	ctx, cancel := context.WithTimeout(c.ctx, apiTimeout)
-	defer cancel()
-	comparison, _, err := c.client.Repositories.CompareCommits(ctx, owner, repo, base, head,
-		&github.ListOptions{PerPage: perPage, Page: page})
-	if err != nil {
-		return nil, fmt.Errorf("failed to compare commits (page %d): %w", page, err)
 	}
 	return comparison, nil
 }

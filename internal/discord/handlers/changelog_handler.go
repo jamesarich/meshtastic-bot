@@ -116,13 +116,6 @@ func getChangelogMessage(base, head string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if total := comparison.GetTotalCommits(); total > len(comparison.Commits) {
-		recent, err := newestCommits(base, head, total)
-		if err != nil {
-			return "", err
-		}
-		comparison.Commits = recent
-	}
 
 	message := formatChangelogMessage(GithubOwner+"/"+GithubRepo, base, head, comparison)
 
@@ -135,28 +128,9 @@ func getChangelogMessage(base, head string) (string, error) {
 	return message, nil
 }
 
-// changelogShown is how many of the newest commits a reply lists.
+// changelogShown is how many of the newest commits a reply lists. The unpaged
+// comparison holds at most 250 commits but always ends with the newest.
 const changelogShown = 10
-
-// newestCommits fetches the last changelogShown commits of a comparison longer
-// than the 250 the unpaged API returns. Pages run oldest first, so the newest
-// sit on the last page, and a short last page is topped up from the one before.
-func newestCommits(base, head string, total int) ([]*gogithub.RepositoryCommit, error) {
-	last := (total + changelogShown - 1) / changelogShown
-	page, err := GithubClient.CompareCommitsPage(GithubOwner, GithubRepo, base, head, changelogShown, last)
-	if err != nil {
-		return nil, err
-	}
-	commits := page.Commits
-	if len(commits) < changelogShown && last > 1 {
-		prev, err := GithubClient.CompareCommitsPage(GithubOwner, GithubRepo, base, head, changelogShown, last-1)
-		if err != nil {
-			return nil, err
-		}
-		commits = append(append([]*gogithub.RepositoryCommit{}, prev.Commits...), commits...)
-	}
-	return commits, nil
-}
 
 func formatChangelogMessage(repoName, base, head string, comparison *gogithub.CommitsComparison) string {
 	var sb strings.Builder

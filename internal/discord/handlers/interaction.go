@@ -144,6 +144,16 @@ func purgeExpiredLocked() {
 	}
 }
 
+// renewModalState restarts a held submission's expiry clock, so a Retry offered
+// after a failure gets the full modalStateTTL.
+func renewModalState(key string) {
+	modalStatesMu.Lock()
+	defer modalStatesMu.Unlock()
+	if state, ok := modalStates[key]; ok {
+		state.CreatedAt = time.Now()
+	}
+}
+
 func dropModalState(key string) {
 	modalStatesMu.Lock()
 	defer modalStatesMu.Unlock()

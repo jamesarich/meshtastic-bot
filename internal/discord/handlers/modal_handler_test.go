@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	internalgithub "github.com/meshtastic/meshtastic-bot/internal/github"
 
@@ -230,4 +231,38 @@ func TestCollectSubmittedValuesIsSafeConcurrently(t *testing.T) {
 	if got := state.answeredCount(); got != 26 {
 		t.Errorf("answered = %d, want 26", got)
 	}
+}
+
+func TestFailedFilingRestartsTheHoldClock(t *testing.T) {
+	resetModalStates()
+	key := "bug_c_42"
+	filedState(key)
+	// The reporter took 25 of the 30 minutes filling the form in.
+	modalStatesMu.Lock()
+	modalStates[key].CreatedAt = time.Now().Add(-25 * time.Minute)
+	modalStatesMu.Unlock()
+
+	withGithubClient(t, &MockGitHubClient{
+		CreateIssueFunc: func(owner, repo, title, body string, labels []string) (*internalgithub.IssueResponse, error) {
+			return nil, errors.New("github API returned 502")
+		},
+	})
+	rec := &submitRecorder{}
+	createIssueFromState(rec.session(t), submitInteraction(), mustState(t, key), key)
+
+	modalStatesMu.Lock()
+	age := time.Since(modalStates[key].CreatedAt)
+	modalStatesMu.Unlock()
+	if age > time.Minute {
+		t.Errorf("after a failure the report expires in %s, not the 30 minutes the reply promises", modalStateTTL-age)
+	}
+}
+
+func mustState(t *testing.T, key string) *ModalState {
+	t.Helper()
+	state, ok := lookupModalState(key)
+	if !ok {
+		t.Fatalf("no state for %s", key)
+	}
+	return state
 }
