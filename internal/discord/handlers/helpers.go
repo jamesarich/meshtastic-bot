@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -184,4 +185,12 @@ func extractModalFields(components []discordgo.MessageComponent) map[string]stri
 	}
 
 	return fields
+}
+
+// formUnavailable tells a reporter why no form opened.
+func formUnavailable(noun string, err error) string {
+	if errors.Is(err, config.ErrNotConfigured) {
+		return fmt.Sprintf("Sorry, the %s command is not configured for this channel.", noun)
+	}
+	return fmt.Sprintf("Sorry, the %s form could not be loaded just now. Please try again in a minute.", noun)
 }

@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"log"
 	"runtime/debug"
 	"strings"
@@ -41,10 +43,29 @@ type ModalState struct {
 	Owner           string
 	Repo            string
 
-	// mu guards SubmittedValues and filing: two submits of the same dialog
-	// arrive on separate goroutines.
+	// mu guards SubmittedValues, filing and the submission fields: two
+	// submits of the same dialog arrive on separate goroutines.
 	mu     sync.Mutex
 	filing bool
+	// submissionID marks this report's issue body so a retry can find an
+	// issue an earlier attempt created; firstAttempt is when that began.
+	submissionID string
+	firstAttempt time.Time
+}
+
+// submission returns the report's body marker, when it was first filed, and
+// whether it has been tried before.
+func (st *ModalState) submission() (marker string, since time.Time, retried bool) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	retried = st.submissionID != ""
+	if !retried {
+		b := make([]byte, 8)
+		_, _ = rand.Read(b)
+		st.submissionID = hex.EncodeToString(b)
+		st.firstAttempt = time.Now()
+	}
+	return "<!-- meshtastic-bot submission " + st.submissionID + " -->", st.firstAttempt.Add(-time.Minute), retried
 }
 
 // startFiling claims the report for one CreateIssue call at a time, so a

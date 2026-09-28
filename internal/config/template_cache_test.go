@@ -117,3 +117,64 @@ func TestFetchGitHubTemplateKeepsCopyWhenRefreshFails(t *testing.T) {
 		t.Errorf("cached copy lost after a failed refresh: %v %+v", err, tpl)
 	}
 }
+
+func TestFetchGitHubTemplateAnswersInTimeWhileLoading(t *testing.T) {
+	release := make(chan struct{})
+	originalHTTP, originalWait := templateHTTP, templateWait
+	templateHTTP = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		<-release
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewBufferString("name: Bug Report\nbody: []\n")), Header: make(http.Header)}, nil
+	})}
+	templateWait = 50 * time.Millisecond
+	templateCacheMu.Lock()
+	templateCache = map[string]*cachedTemplate{}
+	templateCacheMu.Unlock()
+	t.Cleanup(func() { templateHTTP, templateWait = originalHTTP, originalWait })
+	u := testTemplateURL(t)
+
+	start := time.Now()
+	if _, err := FetchGitHubTemplate(u); !errors.Is(err, ErrTemplateLoading) {
+		t.Fatalf("a slow first fetch must return ErrTemplateLoading, got %v", err)
+	}
+	if time.Since(start) > time.Second {
+		t.Errorf("waited %s for a template it has never had", time.Since(start))
+	}
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if tpl, err := FetchGitHubTemplate(u); err == nil && tpl.Name == "Bug Report" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("the background load never landed in the cache")
+}
+
+func TestFailedFirstLoadIsRetried(t *testing.T) {
+	tt := withTemplateTransport(t)
+	originalRetry, originalWait := templateRetry, templateWait
+	templateRetry, templateWait = 20*time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() { templateRetry, templateWait = originalRetry, originalWait })
+	tt.fail.Store(true)
+	u := testTemplateURL(t)
+
+	if _, err := FetchGitHubTemplate(u); !errors.Is(err, ErrTemplateLoading) {
+		t.Fatalf("a failed first fetch must return ErrTemplateLoading, got %v", err)
+	}
+	tt.fail.Store(false)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		templateCacheMu.Lock()
+		ready := templateCache[u.RawURL()].template != nil
+		templateCacheMu.Unlock()
+		if ready {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("a failed first load was not retried in the background")
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

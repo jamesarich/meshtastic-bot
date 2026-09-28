@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/meshtastic/meshtastic-bot/internal/config"
 	internalgithub "github.com/meshtastic/meshtastic-bot/internal/github"
 
 	"github.com/bwmarrin/discordgo"
@@ -265,4 +267,95 @@ func mustState(t *testing.T, key string) *ModalState {
 		t.Fatalf("no state for %s", key)
 	}
 	return state
+}
+
+func TestAFailedAcknowledgementFilesNothing(t *testing.T) {
+	resetModalStates()
+	key := "bug_c_42"
+	state := filedState(key)
+	withGithubClient(t, &MockGitHubClient{
+		CreateIssueFunc: func(owner, repo, title, body string, labels []string) (*internalgithub.IssueResponse, error) {
+			t.Error("filed an issue the reporter could never be told about")
+			return nil, errors.New("unexpected")
+		},
+	})
+	s, _ := discordgo.New("")
+	s.Client = &http.Client{Transport: &MockRoundTripper{RoundTripFunc: func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 404, Body: io.NopCloser(bytes.NewBufferString(`{"message": "Unknown interaction", "code": 10062}`)), Header: make(http.Header)}, nil
+	}}}
+	createIssueFromState(s, submitInteraction(), state, key)
+	if _, ok := lookupModalState(key); !ok {
+		t.Error("the answers were dropped")
+	}
+}
+
+func TestRetryFindsAnIssueTheLostAttemptCreated(t *testing.T) {
+	resetModalStates()
+	key := "bug_c_42"
+	state := filedState(key)
+
+	var firstBody string
+	creates := 0
+	rec := &submitRecorder{}
+	withGithubClient(t, &MockGitHubClient{
+		CreateIssueFunc: func(owner, repo, title, body string, labels []string) (*internalgithub.IssueResponse, error) {
+			creates++
+			firstBody = body
+			// GitHub created it, but the response never arrived.
+			return nil, errors.New("context deadline exceeded")
+		},
+		FindSubmissionFunc: func(owner, repo, marker string, since time.Time) (*internalgithub.IssueResponse, error) {
+			if !strings.Contains(firstBody, marker) {
+				t.Errorf("searched for %q, which the filed body does not carry", marker)
+			}
+			return &internalgithub.IssueResponse{Number: 11, HTMLURL: "https://github.com/meshtastic/web/issues/11"}, nil
+		},
+	})
+
+	createIssueFromState(rec.session(t), submitInteraction(), state, key)
+	handleButtonClick(rec.session(t), retryInteraction(key))
+
+	if creates != 1 {
+		t.Errorf("CreateIssue called %d times; the retry duplicated the report", creates)
+	}
+	if !strings.Contains(firstBody, "<!-- meshtastic-bot submission ") {
+		t.Errorf("the body carries no submission marker:\n%s", firstBody)
+	}
+	if edit := rec.lastEdit(t); edit.Content == nil || !strings.Contains(*edit.Content, "issues/11") {
+		t.Errorf("the retry did not link the issue it found: %v", edit.Content)
+	}
+}
+
+func TestRetryFilesNothingWhenItCannotCheck(t *testing.T) {
+	resetModalStates()
+	key := "bug_c_42"
+	state := filedState(key)
+	creates := 0
+	withGithubClient(t, &MockGitHubClient{
+		CreateIssueFunc: func(owner, repo, title, body string, labels []string) (*internalgithub.IssueResponse, error) {
+			creates++
+			return nil, errors.New("github API returned 502")
+		},
+		FindSubmissionFunc: func(owner, repo, marker string, since time.Time) (*internalgithub.IssueResponse, error) {
+			return nil, errors.New("github API returned 502")
+		},
+	})
+	rec := &submitRecorder{}
+	createIssueFromState(rec.session(t), submitInteraction(), state, key)
+	handleButtonClick(rec.session(t), retryInteraction(key))
+	if creates != 1 {
+		t.Errorf("CreateIssue called %d times after the check failed, want 1", creates)
+	}
+	if edit := rec.lastEdit(t); !strings.Contains(string(edit.Components), retryPrefix+key) {
+		t.Errorf("no Retry offered after the check failed: %s", edit.Components)
+	}
+}
+
+func TestFormUnavailableSaysWhy(t *testing.T) {
+	if got := formUnavailable("bug report", fmt.Errorf("%w: x", config.ErrNotConfigured)); !strings.Contains(got, "not configured") {
+		t.Errorf("not-configured message: %q", got)
+	}
+	if got := formUnavailable("bug report", config.ErrTemplateLoading); !strings.Contains(got, "try again in a minute") {
+		t.Errorf("loading message: %q", got)
+	}
 }

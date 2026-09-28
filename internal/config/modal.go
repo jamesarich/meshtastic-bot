@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -170,8 +171,20 @@ func LoadModals(ConfigPath string) error {
 // entry is still served while the refresh runs in the background.
 const templateCacheTTL = 10 * time.Minute
 
+// ErrNotConfigured means the command has no form in the channel it was run in.
+var ErrNotConfigured = errors.New("no form configured")
+
+// ErrTemplateLoading means a template has never been fetched and did not
+// arrive within templateWait; the fetch carries on in the background.
+var ErrTemplateLoading = errors.New("the issue template is still loading")
+
 var (
-	templateHTTP    = &http.Client{Timeout: 10 * time.Second}
+	templateHTTP = &http.Client{Timeout: 10 * time.Second}
+	// templateWait bounds how long a command waits for a template it has
+	// never had, leaving time to answer within Discord's 3 s.
+	templateWait = 2 * time.Second
+	// templateRetry is how soon a failed first fetch is tried again.
+	templateRetry   = time.Minute
 	templateCacheMu sync.Mutex
 	templateCache   = map[string]*cachedTemplate{}
 )
@@ -180,33 +193,78 @@ type cachedTemplate struct {
 	template   *GitHubIssueTemplate
 	fetched    time.Time
 	refreshing bool
+	// loading is closed when an in-flight first fetch finishes.
+	loading chan struct{}
 }
 
-// FetchGitHubTemplate returns a template from the cache, fetching it on first
-// use. The result is shared; callers must not modify it.
+// FetchGitHubTemplate returns a template from the cache. A template never
+// fetched is loaded in the background, waiting at most templateWait for it.
+// The result is shared; callers must not modify it.
 func FetchGitHubTemplate(templateURL *TemplateURL) (*GitHubIssueTemplate, error) {
 	url := templateURL.RawURL()
 
 	templateCacheMu.Lock()
 	entry, ok := templateCache[url]
-	if ok {
+	if !ok {
+		entry = &cachedTemplate{}
+		templateCache[url] = entry
+	}
+	if entry.template != nil {
 		if time.Since(entry.fetched) >= templateCacheTTL && !entry.refreshing {
 			entry.refreshing = true
 			go refreshTemplate(url)
 		}
+		template := entry.template
 		templateCacheMu.Unlock()
-		return entry.template, nil
+		return template, nil
 	}
+	loading := startLoadLocked(url, entry)
 	templateCacheMu.Unlock()
 
-	template, err := fetchTemplate(url)
-	if err != nil {
-		return nil, err
+	select {
+	case <-loading:
+	case <-time.After(templateWait):
+		return nil, ErrTemplateLoading
 	}
 	templateCacheMu.Lock()
-	templateCache[url] = &cachedTemplate{template: template, fetched: time.Now()}
-	templateCacheMu.Unlock()
-	return template, nil
+	defer templateCacheMu.Unlock()
+	if entry.template == nil {
+		return nil, ErrTemplateLoading
+	}
+	return entry.template, nil
+}
+
+// startLoadLocked starts a first fetch unless one is running; the caller holds
+// templateCacheMu.
+func startLoadLocked(url string, entry *cachedTemplate) chan struct{} {
+	if entry.loading == nil {
+		entry.loading = make(chan struct{})
+		go loadTemplate(url, entry)
+	}
+	return entry.loading
+}
+
+// loadTemplate fetches a template the cache has never held, and on failure
+// tries again after templateRetry until one succeeds.
+func loadTemplate(url string, entry *cachedTemplate) {
+	template, err := fetchTemplate(url)
+	templateCacheMu.Lock()
+	defer templateCacheMu.Unlock()
+	close(entry.loading)
+	entry.loading = nil
+	if err != nil {
+		log.Printf("Could not load a template, retrying in %s: %v", templateRetry, err)
+		time.AfterFunc(templateRetry, func() {
+			templateCacheMu.Lock()
+			defer templateCacheMu.Unlock()
+			if entry.template == nil {
+				startLoadLocked(url, entry)
+			}
+		})
+		return
+	}
+	entry.template = template
+	entry.fetched = time.Now()
 }
 
 func refreshTemplate(url string) {
@@ -225,8 +283,8 @@ func refreshTemplate(url string) {
 	entry.fetched = time.Now()
 }
 
-// PrefetchTemplates warms the cache so the first /bug or /feature does not
-// wait on GitHub. A failure is logged; the command fetches again on use.
+// PrefetchTemplates starts loading every template so the first /bug or
+// /feature finds it cached. It waits at most templateWait for each.
 func PrefetchTemplates() {
 	if loadedModals == nil {
 		return
@@ -393,7 +451,7 @@ func GetAllFieldsForModal(command, channelID string) ([]FieldConfig, string, str
 	}
 
 	if modalConfig == nil {
-		return nil, "", "", "", fmt.Errorf("no modal configured for command '%s' in channel '%s'", command, channelID)
+		return nil, "", "", "", fmt.Errorf("%w: command '%s' in channel '%s'", ErrNotConfigured, command, channelID)
 	}
 
 	var fields []FieldConfig
@@ -482,7 +540,7 @@ func GetModel(command, channelID string) (*discordgo.InteractionResponseData, er
 	}
 
 	if modalConfig == nil {
-		return nil, fmt.Errorf("no modal configured for command '%s' in channel '%s'", command, channelID)
+		return nil, fmt.Errorf("%w: command '%s' in channel '%s'", ErrNotConfigured, command, channelID)
 	}
 
 	var fields []FieldConfig

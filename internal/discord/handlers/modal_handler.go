@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/meshtastic/meshtastic-bot/internal/config"
+	internalgithub "github.com/meshtastic/meshtastic-bot/internal/github"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -21,7 +22,10 @@ func createIssueFromState(s *discordgo.Session, i *discordgo.InteractionCreate, 
 		Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral},
 	})
 	if err != nil {
-		log.Printf("Error deferring the %s submission: %v", state.Command, err)
+		// The token is dead, so an issue filed now could never be reported
+		// back, and the reporter would file it again.
+		log.Printf("Not filing the %s submission; Discord refused the acknowledgement: %v", state.Command, err)
+		return
 	}
 	fileIssue(s, i, state, stateKey)
 }
@@ -34,20 +38,30 @@ func fileIssue(s *discordgo.Session, i *discordgo.InteractionCreate, state *Moda
 		return
 	}
 
-	values := state.answers()
-	body := buildIssueBody(state.AllFields, values, i.Member.User.Username, i.Member.User.ID)
-	issue, err := GithubClient.CreateIssue(state.Owner, state.Repo, state.Title, body, state.Labels)
-	if err != nil {
-		log.Printf("Failed to create GitHub issue: %v", err)
-		state.stopFiling()
-		renewModalState(stateKey)
-		editReply(s, i, "❌ The issue could not be created. Your answers are kept for 30 minutes, so press Retry to try again.",
-			[]discordgo.MessageComponent{
-				discordgo.ActionsRow{Components: []discordgo.MessageComponent{
-					discordgo.Button{Label: "Retry", Style: discordgo.PrimaryButton, CustomID: retryPrefix + stateKey},
-				}},
-			})
-		return
+	marker, since, retried := state.submission()
+	var issue *internalgithub.IssueResponse
+	if retried {
+		// A failed call may still have created the issue; filing again would
+		// duplicate it.
+		found, err := GithubClient.FindSubmission(state.Owner, state.Repo, marker, since)
+		if err != nil {
+			log.Printf("Could not check for an earlier %s filing: %v", state.Command, err)
+			offerRetry(s, i, state, stateKey, "❌ Could not check whether the earlier attempt went through, so nothing was filed. Your answers are kept for 30 minutes, so press Retry to try again.")
+			return
+		}
+		issue = found
+	}
+
+	if issue == nil {
+		values := state.answers()
+		body := buildIssueBody(state.AllFields, values, i.Member.User.Username, i.Member.User.ID) + "\n\n" + marker
+		var err error
+		issue, err = GithubClient.CreateIssue(state.Owner, state.Repo, state.Title, body, state.Labels)
+		if err != nil {
+			log.Printf("Failed to create GitHub issue: %v", err)
+			offerRetry(s, i, state, stateKey, "❌ The issue could not be created. Your answers are kept for 30 minutes, so press Retry to try again.")
+			return
+		}
 	}
 
 	// A Discord modal takes text only, so screenshots, recordings and other
@@ -62,6 +76,16 @@ func fileIssue(s *discordgo.Session, i *discordgo.InteractionCreate, state *Moda
 
 	editReply(s, i, confirmationMessage, []discordgo.MessageComponent{})
 	dropModalState(stateKey)
+}
+
+func offerRetry(s *discordgo.Session, i *discordgo.InteractionCreate, state *ModalState, stateKey, message string) {
+	state.stopFiling()
+	renewModalState(stateKey)
+	editReply(s, i, message, []discordgo.MessageComponent{
+		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+			discordgo.Button{Label: "Retry", Style: discordgo.PrimaryButton, CustomID: retryPrefix + stateKey},
+		}},
+	})
 }
 
 // editReply replaces a deferred reply; empty components clear a Retry button.
@@ -231,7 +255,8 @@ func handleButtonClick(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseDeferredMessageUpdate,
 		}); err != nil {
-			log.Printf("Error deferring the %s retry: %v", state.Command, err)
+			log.Printf("Not retrying the %s submission; Discord refused the acknowledgement: %v", state.Command, err)
+			return
 		}
 		fileIssue(s, i, state, stateKey)
 		return

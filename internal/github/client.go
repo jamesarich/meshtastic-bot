@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,6 +26,7 @@ type Client interface {
 	CompareCommits(owner, repo, base, head string) (*github.CommitsComparison, error)
 	CreateIssue(owner, repo, title, body string, labels []string) (*IssueResponse, error)
 	GetRepository(owner, repo string) (*github.Repository, error)
+	FindSubmission(owner, repo, marker string, since time.Time) (*IssueResponse, error)
 }
 
 type CachedRepository struct {
@@ -38,6 +40,48 @@ type LiveGitHubClient struct {
 	ctx       context.Context
 	repoCache map[string]*CachedRepository
 	cacheMux  sync.RWMutex
+
+	loginMu sync.Mutex
+	login   string
+}
+
+// FindSubmission returns the issue this token filed since `since` whose body
+// holds marker, or nil. It reads the issue list rather than search, which
+// lags, so an attempt whose response was lost is found at once.
+func (c *LiveGitHubClient) FindSubmission(owner, repo, marker string, since time.Time) (*IssueResponse, error) {
+	ctx, cancel := context.WithTimeout(c.ctx, apiTimeout)
+	defer cancel()
+	login, err := c.tokenLogin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	issues, _, err := c.client.Issues.ListByRepo(ctx, owner, repo, &github.IssueListByRepoOptions{
+		Creator: login, State: "all", Since: since, Sort: "created", Direction: "desc",
+		ListOptions: github.ListOptions{PerPage: 50},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list recent issues: %w", err)
+	}
+	for _, issue := range issues {
+		if strings.Contains(issue.GetBody(), marker) {
+			return &IssueResponse{Number: issue.GetNumber(), HTMLURL: issue.GetHTMLURL(), ID: issue.GetID()}, nil
+		}
+	}
+	return nil, nil
+}
+
+func (c *LiveGitHubClient) tokenLogin(ctx context.Context) (string, error) {
+	c.loginMu.Lock()
+	defer c.loginMu.Unlock()
+	if c.login != "" {
+		return c.login, nil
+	}
+	user, _, err := c.client.Users.Get(ctx, "")
+	if err != nil {
+		return "", fmt.Errorf("failed to read the token's user: %w", err)
+	}
+	c.login = user.GetLogin()
+	return c.login, nil
 }
 
 type IssueRequest struct {
