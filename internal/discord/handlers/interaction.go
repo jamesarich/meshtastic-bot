@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"log"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -119,6 +121,14 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 
 // HandleInteraction routes interactions to appropriate handlers
 func HandleInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	// discordgo runs each handler on a bare goroutine, so an unrecovered panic
+	// here ends the process and every submission in flight.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Recovered from panic handling interaction type %d: %v\n%s", i.Type, r, debug.Stack())
+		}
+	}()
+
 	switch i.Type {
 	case discordgo.InteractionApplicationCommand:
 		if handler, exists := commandHandlers[i.ApplicationCommandData().Name]; exists {
