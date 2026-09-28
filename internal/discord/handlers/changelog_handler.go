@@ -75,13 +75,15 @@ func handleChangelog(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		log.Printf("Error getting changelog: %v", err)
 		errMsg := fmt.Sprintf("Failed to compare versions: %s...%s", base, head)
 		s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-			Content: &errMsg,
+			Content:         &errMsg,
+			AllowedMentions: noMentions,
 		})
 		return
 	}
 
 	s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-		Content: &message,
+		Content:         &message,
+		AllowedMentions: noMentions,
 	})
 }
 

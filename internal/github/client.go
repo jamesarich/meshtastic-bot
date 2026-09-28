@@ -107,9 +107,8 @@ func (c *LiveGitHubClient) CompareCommitsPage(owner, repo, base, head string, pe
 }
 
 func (c *LiveGitHubClient) CreateIssue(owner, repo, title, body string, labels []string) (*IssueResponse, error) {
-	log.Printf("[GitHub API] Creating issue in %s/%s", owner, repo)
-	log.Printf("[GitHub API] Title: %s", title)
-	log.Printf("[GitHub API] Labels: %v", labels)
+	// The title is the reporter's own text; it stays out of the host log.
+	log.Printf("[GitHub API] Creating issue in %s/%s with labels %v", owner, repo, labels)
 
 	req := &github.IssueRequest{
 		Title: github.String(title),

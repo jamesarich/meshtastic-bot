@@ -86,7 +86,8 @@ func handleRepo(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		log.Printf("Error getting repository %s/%s: %v", GithubOwner, repo, err)
 		errorMsg := fmt.Sprintf("Repository `%s/%s` not found in the organization.", GithubOwner, repo)
 		s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-			Content: &errorMsg,
+			Content:         &errorMsg,
+			AllowedMentions: noMentions,
 		})
 		return
 	}
@@ -94,6 +95,7 @@ func handleRepo(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	githubURL := repository.GetHTMLURL()
 
 	s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-		Content: &githubURL,
+		Content:         &githubURL,
+		AllowedMentions: noMentions,
 	})
 }

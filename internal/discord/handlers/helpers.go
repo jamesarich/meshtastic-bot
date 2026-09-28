@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -9,6 +10,20 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 )
+
+// noMentions stops a public reply pinging anyone: they echo user input and
+// commit messages, either of which can hold @everyone.
+var noMentions = &discordgo.MessageAllowedMentions{Parse: []discordgo.AllowedMentionType{}}
+
+// githubMention matches an @user or @org/team mention; a word character or @
+// before it (an email address) is not one.
+var githubMention = regexp.MustCompile(`(^|[^\w@])@([A-Za-z0-9])`)
+
+// defuseMentions keeps the text but stops GitHub notifying anyone, since the
+// issue is authored by an org member whose mentions reach teams.
+func defuseMentions(s string) string {
+	return githubMention.ReplaceAllString(s, "$1@\u200b$2")
+}
 
 // commandTitleOption returns the value of the "title" slash-command option.
 //
@@ -125,7 +140,7 @@ func buildIssueBody(allFields []config.FieldConfig, submittedValues map[string]s
 			continue
 		}
 		written[field.Label] = true
-		body.WriteString(fmt.Sprintf("### %s\n%s\n\n", field.Label, value))
+		body.WriteString(fmt.Sprintf("### %s\n%s\n\n", field.Label, defuseMentions(value)))
 	}
 
 	// A submitted value that matches no template field still belongs in the
@@ -138,7 +153,7 @@ func buildIssueBody(allFields []config.FieldConfig, submittedValues map[string]s
 	}
 	sort.Strings(leftover)
 	for _, label := range leftover {
-		body.WriteString(fmt.Sprintf("### %s\n%s\n\n", label, submittedValues[label]))
+		body.WriteString(fmt.Sprintf("### %s\n%s\n\n", label, defuseMentions(submittedValues[label])))
 	}
 
 	body.WriteString(fmt.Sprintf("\n---\nSubmitted via Discord by: %s (%s)", username, userID))
