@@ -11,13 +11,8 @@ import (
 	"unicode/utf8"
 )
 
-const (
-	// logFileLimit is how much of one attached file is read.
-	logFileLimit = 256 << 10
-	// logBodyBudget bounds the logs in one issue; GitHub rejects a body over
-	// 65536 characters, and the answers need room too.
-	logBodyBudget = 40000
-)
+// logFileLimit is how much of one attached file is read.
+const logFileLimit = 256 << 10
 
 var logHTTP = &http.Client{Timeout: 10 * time.Second}
 
@@ -39,35 +34,50 @@ func isTextFile(f AttachedFile) bool {
 
 // fetchLogs downloads the reporter's text attachments. Discord's attachment
 // links expire, so the text itself goes in the issue rather than a link.
-func fetchLogs(files []AttachedFile) []logFile {
+//
+// room is the characters left for the logs as formatLog renders them, fences
+// and wrappers included; a log that does not fit is cut to fit, and an entry
+// with no room even for its note is dropped.
+func fetchLogs(files []AttachedFile, room int) []logFile {
 	out := make([]logFile, 0, len(files))
-	budget := logBodyBudget
 	for _, f := range files {
 		entry := logFile{Name: f.Name}
-		switch {
-		case !isTextFile(f):
+		if !isTextFile(f) {
 			entry.Note = "not included; only text files can be attached from Discord, so add it in a comment"
-		case budget <= 0:
-			entry.Note = "not included; the issue has no room for more logs"
-		default:
-			text, truncated, err := downloadText(f.URL)
-			if err != nil {
-				log.Printf("Could not download an attached log: %v", err)
-				entry.Note = "could not be downloaded"
-				break
-			}
-			if r := []rune(text); len(r) > budget {
-				text, truncated = string(r[:budget]), true
-			}
-			budget -= utf8.RuneCountInString(text)
+		} else if text, truncated, err := downloadText(f.URL); err != nil {
+			log.Printf("Could not download an attached log: %v", err)
+			entry.Note = "could not be downloaded"
+		} else {
 			entry.Content = text
 			if truncated {
 				entry.Note = "truncated"
 			}
+			entry = fitLog(entry, room)
 		}
-		out = append(out, entry)
+		if size := renderedSize(entry); size <= room {
+			out = append(out, entry)
+			room -= size
+		}
 	}
 	return out
+}
+
+func renderedSize(l logFile) int { return utf8.RuneCountInString(formatLog(l)) }
+
+// fitLog cuts a log's text until its rendered entry fits room. Cutting can
+// only shorten the fence, so the overhead measured on the full text bounds it.
+func fitLog(l logFile, room int) logFile {
+	size := renderedSize(l)
+	if size <= room {
+		return l
+	}
+	cut := logFile{Name: l.Name, Content: l.Content, Note: "truncated"}
+	keep := room - (renderedSize(cut) - utf8.RuneCountInString(l.Content))
+	if keep <= 0 {
+		return logFile{Name: l.Name, Note: "not included; the issue has no room for more logs"}
+	}
+	cut.Content = string([]rune(l.Content)[:keep])
+	return cut
 }
 
 func downloadText(url string) (text string, truncated bool, err error) {

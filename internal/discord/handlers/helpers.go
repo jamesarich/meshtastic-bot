@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/meshtastic/meshtastic-bot/internal/config"
 
@@ -179,7 +180,7 @@ func buildIssueBody(allFields []config.FieldConfig, submittedValues map[string]s
 	}
 
 	if len(logs) > 0 {
-		body.WriteString("### Log files\n\n")
+		body.WriteString(logsHeading)
 		for _, l := range logs {
 			body.WriteString(formatLog(l))
 		}
@@ -188,6 +189,34 @@ func buildIssueBody(allFields []config.FieldConfig, submittedValues map[string]s
 	body.WriteString(fmt.Sprintf("\n---\nSubmitted via Discord by: %s (%s)", username, userID))
 
 	return body.String()
+}
+
+const (
+	// githubBodyLimit is GitHub's cap on an issue body, in characters.
+	githubBodyLimit = 65536
+	logsHeading     = "### Log files\n\n"
+)
+
+// issueBody is the issue body with as much of the attached logs as fits
+// GitHub's limit once the answers are in.
+// The marker, the retry's only way to find this issue, goes last and is
+// never cut.
+func issueBody(fields []config.FieldConfig, values map[string]string, files []AttachedFile, username, userID, marker string) string {
+	trailer := "\n\n" + marker
+	limit := githubBodyLimit - utf8.RuneCountInString(trailer)
+	body := buildIssueBody(fields, values, nil, username, userID)
+	if len(files) > 0 {
+		room := limit - utf8.RuneCountInString(body) - utf8.RuneCountInString(logsHeading)
+		if logs := fetchLogs(files, room); len(logs) > 0 {
+			body = buildIssueBody(fields, values, logs, username, userID)
+		}
+	}
+	// Only answers far beyond any template's field limits reach this.
+	if r := []rune(body); len(r) > limit {
+		const cut = "\n\n_Cut to fit GitHub's limit._"
+		body = string(r[:limit-utf8.RuneCountInString(cut)]) + cut
+	}
+	return body + trailer
 }
 
 // formatAnswer renders one answer. Mentions inside a code fence notify nobody,

@@ -3,11 +3,13 @@ package handlers
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/meshtastic/meshtastic-bot/internal/config"
 
@@ -130,7 +132,7 @@ func TestFetchLogsInlinesTextAndExplainsTheRest(t *testing.T) {
 		{Name: "bug.png", URL: srv.URL + "/bug.png", ContentType: "image/png"},
 		{Name: "binary.log", URL: srv.URL + "/binary.log"},
 		{Name: "gone.txt", URL: srv.URL + "/gone.txt"},
-	})
+	}, githubBodyLimit)
 	if len(logs) != 4 {
 		t.Fatalf("got %d entries, want one per file", len(logs))
 	}
@@ -194,5 +196,53 @@ func TestIssueTitleAndLabelsFollowTheTemplate(t *testing.T) {
 	}
 	if got := issueLabels(nil, "enhancement"); strings.Join(got, ",") != "from-discord,enhancement" {
 		t.Errorf("fallback labels = %v", got)
+	}
+}
+
+func TestIssueBodyStaysWithinGitHubsLimit(t *testing.T) {
+	// Five full-length answers plus five large logs, each with a backtick run
+	// that forces a long fence: the worst the web and Android bug forms allow.
+	big := strings.Repeat("é", 4000)
+	logText := strings.Repeat("`", 900) + "\n" + strings.Repeat("ERROR radio é\n", 20000)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(logText)) }))
+	defer srv.Close()
+
+	var fields []config.FieldConfig
+	values := map[string]string{}
+	for n := 0; n < 5; n++ {
+		label := fmt.Sprintf("Answer %d", n)
+		fields = append(fields, config.FieldConfig{CustomID: label, Label: label, Style: "paragraph"})
+		values[label] = big
+	}
+	var files []AttachedFile
+	for n := 0; n < 5; n++ {
+		files = append(files, AttachedFile{Name: fmt.Sprintf("log%d.txt", n), URL: srv.URL + "/log", ContentType: "text/plain"})
+	}
+
+	const marker = "<!-- meshtastic-bot submission 0123456789abcdef -->"
+	body := issueBody(fields, values, files, "reporter", "42", marker)
+	if n := utf8.RuneCountInString(body); n > githubBodyLimit {
+		t.Fatalf("body is %d characters, over GitHub's %d", n, githubBodyLimit)
+	}
+	if !strings.Contains(body, "(truncated)") || !strings.Contains(body, "Submitted via Discord by: reporter (42)") {
+		t.Errorf("want a truncated log and the footer intact")
+	}
+	if !strings.HasSuffix(body, "\n\n"+marker) {
+		t.Errorf("the submission marker must end the body, uncut")
+	}
+	// Every fence that opens a log also closes it.
+	fence := strings.Repeat("`", 901)
+	if opens := strings.Count(body, fence+"\n"); opens == 0 || strings.Count(body, "\n"+fence+"\n") < opens {
+		t.Errorf("a log fence was cut open")
+	}
+}
+
+func TestFitLogCountsTheRenderedEntry(t *testing.T) {
+	l := logFile{Name: "device.log", Content: strings.Repeat("`", 50) + strings.Repeat("x", 5000)}
+	for _, room := range []int{0, 40, 200, 1000, 6000} {
+		got := fitLog(l, room)
+		if size := renderedSize(got); size > room && got.Content != "" {
+			t.Errorf("room %d: rendered entry is %d characters", room, size)
+		}
 	}
 }

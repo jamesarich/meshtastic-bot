@@ -61,8 +61,7 @@ func fileIssue(s *discordgo.Session, i *discordgo.InteractionCreate, state *Moda
 
 	if issue == nil {
 		values := state.answers()
-		logs := fetchLogs(state.files())
-		body := buildIssueBody(state.AllFields, values, logs, i.Member.User.Username, i.Member.User.ID) + "\n\n" + marker
+		body := issueBody(state.AllFields, values, state.files(), i.Member.User.Username, i.Member.User.ID, marker)
 		var err error
 		issue, err = GithubClient.CreateIssue(state.Owner, state.Repo, state.Title, body, state.Labels)
 		if err != nil {
