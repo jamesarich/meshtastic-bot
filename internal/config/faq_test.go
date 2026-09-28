@@ -118,9 +118,16 @@ func TestFAQData_FindFAQItem(t *testing.T) {
 			wantFound: false,
 		},
 		{
-			name:      "exact match required",
+			name:      "case-insensitive match",
 			searchFor: "getting started",
-			wantFound: false,
+			wantFound: true,
+			wantURL:   "https://example.com/start",
+		},
+		{
+			name:      "surrounding whitespace ignored",
+			searchFor: "  python sdk ",
+			wantFound: true,
+			wantURL:   "https://example.com/python",
 		},
 		{
 			name:      "empty search",

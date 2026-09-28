@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -50,13 +51,17 @@ func (f *FAQData) GetAllFAQItems() []FAQItem {
 
 // FindFAQItem searches for an FAQ item by name (case-insensitive)
 func (f *FAQData) FindFAQItem(name string) (FAQItem, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return FAQItem{}, false
+	}
 	for _, item := range f.FAQ {
-		if item.Name == name {
+		if strings.EqualFold(item.Name, name) {
 			return item, true
 		}
 	}
 	for _, item := range f.SoftwareModules {
-		if item.Name == name {
+		if strings.EqualFold(item.Name, name) {
 			return item, true
 		}
 	}
