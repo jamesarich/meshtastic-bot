@@ -453,3 +453,28 @@ func TestAFailedSearchStillFilesTheReport(t *testing.T) {
 		t.Errorf("filed %d issues after a failed search, want 1", created)
 	}
 }
+
+func TestTheDuplicatesOfferRestartsTheHoldClock(t *testing.T) {
+	resetModalStates()
+	key := "bug_c_42"
+	state := filedState(key)
+	state.SearchText = "Crash on boot"
+	modalStatesMu.Lock()
+	modalStates[key].CreatedAt = time.Now().Add(-25 * time.Minute)
+	modalStatesMu.Unlock()
+
+	withGithubClient(t, &MockGitHubClient{
+		SimilarIssuesFunc: func(owner, repo, text string, limit int) ([]internalgithub.SimilarIssue, error) {
+			return []internalgithub.SimilarIssue{{Number: 1, Title: "Crash", State: "open", URL: "https://github.com/meshtastic/web/issues/1"}}, nil
+		},
+	})
+	rec := &submitRecorder{}
+	createIssueFromState(rec.session(t), submitInteraction(), state, key)
+
+	modalStatesMu.Lock()
+	age := time.Since(modalStates[key].CreatedAt)
+	modalStatesMu.Unlock()
+	if age > time.Minute {
+		t.Errorf("after the offer the report expires in %s, not the 30 minutes it promises", modalStateTTL-age)
+	}
+}

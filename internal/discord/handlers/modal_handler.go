@@ -71,6 +71,7 @@ func offerSimilar(s *discordgo.Session, i *discordgo.InteractionCreate, similar 
 		b.WriteString(fmt.Sprintf("- [#%d %s](<%s>) (%s)\n", issue.Number, escape.Replace(issue.Title), issue.URL, issue.State))
 	}
 	b.WriteString("\nIf it is, add to that issue instead. Otherwise file yours; your answers are kept for 30 minutes.")
+	renewModalState(stateKey)
 	editReply(s, i, b.String(), []discordgo.MessageComponent{
 		discordgo.ActionsRow{Components: []discordgo.MessageComponent{
 			discordgo.Button{Label: "File anyway", Style: discordgo.PrimaryButton, CustomID: fileAnywayPrefix + stateKey},
